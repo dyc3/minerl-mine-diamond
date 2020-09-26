@@ -1,9 +1,18 @@
 # Simple env test.
+# HACK: fixes strange "Failed to get convolution algorithm." error. If something breaks, try removing this configuration
+import tensorflow as tf
+gpus = tf.config.experimental.list_physical_devices('GPU')
+tf.config.experimental.set_memory_growth(gpus[0], True)
+
 import json
 import select
 import time
 import logging
 import os
+import random
+import numpy as np
+from tqdm import tqdm
+from alive_progress import alive_bar
 
 import aicrowd_helper
 import gym
@@ -37,7 +46,25 @@ parser = Parser('performance/',
                 submission_timeout=MINERL_TRAINING_TIMEOUT*60,
                 initial_poll_timeout=600)
 
+from models import make_diamond_miner_model
+
+model = make_diamond_miner_model((64, 64, 3), (64,))
+model.summary()
+# tf.keras.utils.plot_model(model, show_shapes=True, show_layer_names=True)
+
+epsilon_start = 0.99
+epsilon_min = 0.01
+epsilon = epsilon_start
+max_timesteps = 100000
+explore_ts = max_timesteps * 0.8
+gamma = 0.9
+memory = []
+memory_size = 300
+batch_size = 32
+
 def main():
+    global epsilon
+    global memory
     """
     This function will be called for training phase.
     """
@@ -48,31 +75,93 @@ def main():
     # Sample code for illustration, add your training code below
     env = gym.make(MINERL_GYM_ENV)
 
-#     actions = [env.action_space.sample() for _ in range(10)] # Just doing 10 samples in this example
-#     xposes = []
-#     for _ in range(1):
-#         obs = env.reset()
-#         done = False
-#         netr = 0
+    # pre train
+    with alive_bar(title="pretrain", calibrate=120) as bar:
+        count = 0
+        for current_state, action, reward, next_state, done in data.batch_iter(batch_size=2, num_epochs=20, seq_len=32):
+            model.train_on_batch([current_state["pov"].reshape(-1, 64, 64, 3), current_state["vector"].reshape(-1, 64)], action["vector"].reshape(-1, 64))
+            count += 1
+            bar()
 
-#         # Limiting our code to 1024 steps in this example, you can do "while not done" to run till end
-#         while not done:
+    env.make_interactive(port=6666)
 
-            # To get better view in your training phase, it is suggested
-            # to register progress continuously, example when 54% completed
-            # aicrowd_helper.register_progress(0.54)
+    aicrowd_helper.training_start()
+    episodes = 1024
+    for episode in range(episodes):
+        obs = env.reset()
+        done = False
+        netr = 0
 
-            # To fetch latest information from instance manager, you can run below when you want to know the state
-            #>> parser.update_information()
-            #>> print(parser.payload)
-            # .payload: provide AIcrowd generated json
-            # Example: {'state': 'RUNNING', 'score': {'score': 0.0, 'score_secondary': 0.0}, 'instances': {'1': {'totalNumberSteps': 2001, 'totalNumberEpisodes': 0, 'currentEnvironment': 'MineRLObtainDiamond-v0', 'state': 'IN_PROGRESS', 'episodes': [{'numTicks': 2001, 'environment': 'MineRLObtainDiamond-v0', 'rewards': 0.0, 'state': 'IN_PROGRESS'}], 'score': {'score': 0.0, 'score_secondary': 0.0}}}}
-            # .current_state: provide indepth state information avaiable as dictionary (key: instance id)
+        epoch_loss = []
+        with alive_bar(title=f"episode: {episode}") as bar:
+            while not done:
+                bar.text("perform action")
+                if np.random.rand() < epsilon:
+                    bar.text("perform action: explore")
+                    action = env.action_space.sample()
+                else:
+                    bar.text("perform action: predict")
+                    action = env.action_space.noop()
+                    action["vector"] = model.predict([obs["pov"].reshape(-1, 64, 64, 3), obs["vector"].reshape(-1, 64)])[0]
+                new_obs, reward, done, info = env.step(action)
+                netr += reward
+
+                memory.append((obs, action, reward, new_obs, done))
+                # Make sure we restrict memory size to specified limit
+                if len(memory) > memory_size:
+                    memory.pop(0)
+
+                bar.text("training: build replay")
+                replay = random.sample(memory, min(batch_size, len(memory)))
+                states_pov = np.array([a[0]["pov"] for a in replay]).reshape(-1, 64, 64, 3)
+                states_vector = np.array([a[0]["vector"] for a in replay]).reshape(-1, 64)
+                new_states_pov = np.array([a[3]["pov"] for a in replay]).reshape(-1, 64, 64, 3)
+                new_states_vector = np.array([a[3]["vector"] for a in replay]).reshape(-1, 64)
+
+                # Predict the expected utility of current state and new state
+                bar.text("training: predict Q")
+                Q = model.predict([states_pov, states_vector])
+                # bar.text("training: predict Q_new")
+                # Q_new = model.predict([new_states_pov, new_states_vector])
+
+                X_pov = np.empty((len(replay), *env.observation_space["pov"].shape))
+                X_vector = np.empty((len(replay), env.observation_space["vector"].shape[0]))
+                y = np.empty((len(replay), env.action_space["vector"].shape[0]))
+
+                # Construct training set
+                bar.text("training: build y")
+                for i in range(len(replay)):
+                    state_r, action_r, reward_r, new_state_r, done_r = replay[i]
+
+                    target = Q[i]
+                    # target["pov"][action_r] = reward_r
+                    # target["vector"][action_r] = reward_r
+                    # # If we're done the utility is simply the reward of executing action a in
+                    # # state s, otherwise we add the expected maximum future reward as well
+                    # if not done_r:
+                    #     target[action_r] += gamma * np.amax(Q_new[i])
+
+                    X_pov[i] = state_r["pov"]
+                    X_vector[i] = state_r["vector"]
+                    y[i] = target
+
+                bar.text("training: single batch")
+                loss = model.train_on_batch([X_pov, X_vector], y)
+                epoch_loss.append(loss)
+
+                if epsilon > epsilon_min:
+                    epsilon -= (epsilon_start - epsilon_min) / explore_ts
+                print("net reward", netr, "loss:", loss, "epsilon:", epsilon)
+                bar()
+                obs = new_obs
+
+        aicrowd_helper.register_progress(episode / episodes)
 
     # Save trained model to train/ directory
     # Training 100% Completed
     aicrowd_helper.register_progress(1)
-    #env.close()
+    aicrowd_helper.training_end()
+    env.close()
 
 
 if __name__ == "__main__":

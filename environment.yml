@@ -6,10 +6,13 @@ dependencies:
   - python=3.6
   - pip
   - py-opencv
-  - cudatoolkit=10.0
+  - cudatoolkit=10.1
+  - ipykernel
   - pip:
     - crowdai_api
     - minerl
     - coloredlogs
     - matplotlib
     - pyro4
+    - tensorflow-gpu==2.3.0
+    - alive-progress
