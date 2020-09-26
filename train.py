@@ -10,6 +10,7 @@ import time
 import logging
 import os
 import random
+from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 from alive_progress import alive_bar
@@ -46,6 +47,10 @@ parser = Parser('performance/',
                 submission_timeout=MINERL_TRAINING_TIMEOUT*60,
                 initial_poll_timeout=600)
 
+checkpoint_dir = Path("ckpt/")
+if not checkpoint_dir.exists():
+    checkpoint_dir.mkdir()
+
 from models import make_diamond_miner_model
 
 model = make_diamond_miner_model((64, 64, 3), (64,))
@@ -55,7 +60,7 @@ model.summary()
 epsilon_start = 0.99
 epsilon_min = 0.01
 epsilon = epsilon_start
-max_timesteps = 100000
+max_timesteps = 10000
 explore_ts = max_timesteps * 0.8
 gamma = 0.9
 memory = []
@@ -76,18 +81,28 @@ def main():
     env = gym.make(MINERL_GYM_ENV)
 
     # pre train
-    with alive_bar(title="pretrain", calibrate=120) as bar:
-        count = 0
-        for current_state, action, reward, next_state, done in data.batch_iter(batch_size=2, num_epochs=20, seq_len=32):
-            model.train_on_batch([current_state["pov"].reshape(-1, 64, 64, 3), current_state["vector"].reshape(-1, 64)], action["vector"].reshape(-1, 64))
-            count += 1
-            bar()
+    if (checkpoint_dir / "pretrain.h5").exists():
+        print("Loading pretrain weights")
+        model.load_weights(checkpoint_dir / "pretrain.h5")
+    else:
+        with alive_bar(title="pretrain", calibrate=120) as bar:
+            for current_state, action, reward, next_state, done in data.batch_iter(batch_size=2, num_epochs=20, seq_len=32):
+                model.train_on_batch([current_state["pov"].reshape(-1, 64, 64, 3), current_state["vector"].reshape(-1, 64)], action["vector"].reshape(-1, 64))
+                bar()
+        model.save_weights(checkpoint_dir / "pretrain.h5")
 
     env.make_interactive(port=6666)
 
     aicrowd_helper.training_start()
     episodes = 1024
     for episode in range(episodes):
+        if (checkpoint_dir / f"episode-{episode}.h5").exists():
+            if not (checkpoint_dir / f"episode-{episode + 1}.h5").exists():
+                model.load_weights(checkpoint_dir / f"episode-{episode}.h5")
+            if epsilon > epsilon_min:
+                epsilon -= (epsilon_start - epsilon_min) / explore_ts
+            continue
+
         obs = env.reset()
         done = False
         netr = 0
@@ -95,8 +110,8 @@ def main():
         epoch_loss = []
         with alive_bar(title=f"episode: {episode}") as bar:
             while not done:
-                bar.text("perform action")
-                if np.random.rand() < epsilon:
+                explore = np.random.rand() < epsilon
+                if explore:
                     bar.text("perform action: explore")
                     action = env.action_space.sample()
                 else:
@@ -151,9 +166,10 @@ def main():
 
                 if epsilon > epsilon_min:
                     epsilon -= (epsilon_start - epsilon_min) / explore_ts
-                print("net reward", netr, "loss:", loss, "epsilon:", epsilon)
+                print("explore:", explore, "net reward:", netr, "loss:", loss, "epsilon:", epsilon)
                 bar()
                 obs = new_obs
+        model.save_weights(checkpoint_dir / f"episode-{episode}.h5")
 
         aicrowd_helper.register_progress(episode / episodes)
 

@@ -16,3 +16,5 @@ dependencies:
     - pyro4
     - tensorflow-gpu==2.3.0
     - alive-progress
+    - pyyaml
+    - h5py
