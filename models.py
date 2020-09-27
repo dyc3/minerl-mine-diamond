@@ -22,9 +22,9 @@ def make_diamond_miner_model(pov_shape: tuple, state_shape: tuple) -> Model:
 
     x = Concatenate()([pov_parsing, state_parsing])
     x = Dense(128, kernel_initializer='random_normal')(x)
-    x = Dense(128, activation='relu', kernel_initializer='random_normal')(x)
-    x = Dense(128, activation='relu', kernel_initializer='random_normal')(x)
-    output = Dense(64, kernel_initializer='random_normal')(x)
+    x = Dense(128, kernel_initializer='random_normal')(x)
+    x = Dense(128, kernel_initializer='random_normal')(x)
+    output = Dense(64, activation='tanh', kernel_initializer='random_normal')(x)
     model = Model(inputs=[pov_input, state_input], outputs=output)
     model.compile(loss='mse', optimizer=Adam(lr=LEARNING_RATE))
     return model
