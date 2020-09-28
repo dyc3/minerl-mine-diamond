@@ -3,8 +3,6 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import *
 from tensorflow.keras.optimizers import Adam
 
-LEARNING_RATE = 1e-3
-
 def make_diamond_miner_model(pov_shape: tuple, state_shape: tuple) -> Model:
     assert isinstance(pov_shape, tuple)
     assert isinstance(state_shape, tuple)
@@ -21,13 +19,8 @@ def make_diamond_miner_model(pov_shape: tuple, state_shape: tuple) -> Model:
     state_parsing = Dense(64, kernel_initializer='random_normal')(state_input)
 
     x = Concatenate()([pov_parsing, state_parsing])
-    x = Dense(128, kernel_initializer='random_normal')(x)
-    x = Dense(128, kernel_initializer='random_normal')(x)
-    x = Dense(128, kernel_initializer='random_normal')(x)
-    output = Dense(64, activation='tanh', kernel_initializer='random_normal')(x)
-    model = Model(inputs=[pov_input, state_input], outputs=output)
-    model.compile(loss='mse', optimizer=Adam(lr=LEARNING_RATE))
-    return model
-
-
-
+    x = Dense(512, kernel_initializer='random_normal')(x)
+    # x = Dense(128, kernel_initializer='random_normal')(x)
+    # x = Dense(128, kernel_initializer='random_normal')(x)
+    output = Dense(64, activation='linear', kernel_initializer='random_normal')(x)
+    return Model(inputs=[pov_input, state_input], outputs=output)

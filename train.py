@@ -51,21 +51,31 @@ checkpoint_dir = Path("ckpt/")
 if not checkpoint_dir.exists():
     checkpoint_dir.mkdir()
 
+from tensorflow import keras
 from models import make_diamond_miner_model
+from tensorflow.keras.optimizers import Adam
+
+LEARNING_RATE = 2.5e-4
 
 model = make_diamond_miner_model((64, 64, 3), (64,))
+model_target = make_diamond_miner_model((64, 64, 3), (64,))
+loss_function = keras.losses.Huber()
+optimizer = Adam(learning_rate=LEARNING_RATE)
+model.compile(loss='mse', optimizer=optimizer)
 model.summary()
 # tf.keras.utils.plot_model(model, show_shapes=True, show_layer_names=True)
 
 epsilon_start = 0.99
 epsilon_min = 0.01
 epsilon = epsilon_start
-max_timesteps = 10000
+max_timesteps = 100000
 explore_ts = max_timesteps * 0.8
 gamma = 0.9
 memory = []
 memory_size = 300
 batch_size = 32
+train_interval = 4 # train the model every x frames
+target_update_interval = 10000 # update the target model every x frames
 
 def main():
     global epsilon
@@ -86,14 +96,16 @@ def main():
         model.load_weights(checkpoint_dir / "pretrain.h5")
     else:
         with alive_bar(title="pretrain", calibrate=120) as bar:
-            for current_state, action, reward, next_state, done in data.batch_iter(batch_size=2, num_epochs=20, seq_len=32):
+            for current_state, action, reward, next_state, done in data.batch_iter(batch_size=2, num_epochs=1, seq_len=32):
                 model.train_on_batch([current_state["pov"].reshape(-1, 64, 64, 3), current_state["vector"].reshape(-1, 64)], action["vector"].reshape(-1, 64))
                 bar()
         model.save_weights(checkpoint_dir / "pretrain.h5")
+    model_target.set_weights(model.get_weights())
 
     env.make_interactive(port=6666)
 
     aicrowd_helper.training_start()
+    frame_count = 0
     episodes = 1024
     for episode in range(episodes):
         if (checkpoint_dir / f"episode-{episode}.h5").exists():
@@ -101,6 +113,7 @@ def main():
                 model.load_weights(checkpoint_dir / f"episode-{episode}.h5")
             if epsilon > epsilon_min:
                 epsilon -= (epsilon_start - epsilon_min) / explore_ts
+            frame_count += 6000
             continue
 
         obs = env.reset()
@@ -126,49 +139,46 @@ def main():
                 if len(memory) > memory_size:
                     memory.pop(0)
 
-                bar.text("training: build replay")
-                replay = random.sample(memory, min(batch_size, len(memory)))
-                states_pov = np.array([a[0]["pov"] for a in replay]).reshape(-1, 64, 64, 3)
-                states_vector = np.array([a[0]["vector"] for a in replay]).reshape(-1, 64)
-                new_states_pov = np.array([a[3]["pov"] for a in replay]).reshape(-1, 64, 64, 3)
-                new_states_vector = np.array([a[3]["vector"] for a in replay]).reshape(-1, 64)
+                if frame_count % train_interval == 0:
+                    bar.text("training: build replay")
+                    replay = random.sample(memory, min(batch_size, len(memory)))
+                    states_pov = np.array([a[0]["pov"] for a in replay]).reshape(-1, 64, 64, 3)
+                    states_vector = np.array([a[0]["vector"] for a in replay]).reshape(-1, 64)
+                    # new_states_pov = np.array([a[3]["pov"] for a in replay]).reshape(-1, 64, 64, 3)
+                    # new_states_vector = np.array([a[3]["vector"] for a in replay]).reshape(-1, 64)
 
-                # Predict the expected utility of current state and new state
-                bar.text("training: predict Q")
-                Q = model.predict([states_pov, states_vector])
-                # bar.text("training: predict Q_new")
-                # Q_new = model.predict([new_states_pov, new_states_vector])
+                    # Predict the expected utility of current state and new state
+                    bar.text("training: predict Q")
+                    Q = model_target.predict([states_pov, states_vector])
+                    Q_new = [a[2] for a in replay] + gamma * tf.reduce_max(
+                        Q, axis=1
+                    )
 
-                X_pov = np.empty((len(replay), *env.observation_space["pov"].shape))
-                X_vector = np.empty((len(replay), env.observation_space["vector"].shape[0]))
-                y = np.empty((len(replay), env.action_space["vector"].shape[0]))
+                    # masks = tf.one_hot([a[1]["vector"] for a in replay], 64)
 
-                # Construct training set
-                bar.text("training: build y")
-                for i in range(len(replay)):
-                    state_r, action_r, reward_r, new_state_r, done_r = replay[i]
+                    bar.text("training: backprop")
+                    with tf.GradientTape() as tape:
+                        # Train the model on the states and updated Q-values
+                        q_values = model([states_pov, states_vector])
 
-                    target = Q[i]
-                    # target["pov"][action_r] = reward_r
-                    # target["vector"][action_r] = reward_r
-                    # # If we're done the utility is simply the reward of executing action a in
-                    # # state s, otherwise we add the expected maximum future reward as well
-                    # if not done_r:
-                    #     target[action_r] += gamma * np.amax(Q_new[i])
-
-                    X_pov[i] = state_r["pov"]
-                    X_vector[i] = state_r["vector"]
-                    y[i] = target
-
-                bar.text("training: single batch")
-                loss = model.train_on_batch([X_pov, X_vector], y)
-                epoch_loss.append(loss)
+                        # Apply the masks to the Q-values to get the Q-value for action taken
+                        # q_action = tf.reduce_sum(tf.multiply(q_values, masks), axis=1)
+                        q_action = tf.reduce_sum(q_values, axis=1)
+                        # Calculate loss between new Q-value and old Q-value
+                        loss = loss_function(Q_new, q_action)
+                        grads = tape.gradient(loss, model.trainable_variables)
+                        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+                    epoch_loss.append(loss)
 
                 if epsilon > epsilon_min:
                     epsilon -= (epsilon_start - epsilon_min) / explore_ts
                 print("explore:", explore, "net reward:", netr, "loss:", loss, "epsilon:", epsilon)
                 bar()
                 obs = new_obs
+                if frame_count % target_update_interval == 0:
+                    print("updated target model")
+                    model_target.set_weights(model.get_weights())
+                frame_count += 1
         model.save_weights(checkpoint_dir / f"episode-{episode}.h5")
 
         aicrowd_helper.register_progress(episode / episodes)
