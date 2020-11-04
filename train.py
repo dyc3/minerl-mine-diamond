@@ -96,8 +96,9 @@ def main():
         model.load_weights(checkpoint_dir / "pretrain.h5")
     else:
         with alive_bar(title="pretrain", calibrate=120) as bar:
-            for current_state, action, reward, next_state, done in data.batch_iter(batch_size=2, num_epochs=1, seq_len=32):
-                model.train_on_batch([current_state["pov"].reshape(-1, 64, 64, 3), current_state["vector"].reshape(-1, 64)], action["vector"].reshape(-1, 64))
+            for current_state, action, reward, next_state, done in data.batch_iter(batch_size=2, num_epochs=5, seq_len=32):
+                loss = model.train_on_batch([current_state["pov"].reshape(-1, 64, 64, 3), current_state["vector"].reshape(-1, 64)], action["vector"].reshape(-1, 64))
+                bar.text(f"loss: {loss}")
                 bar()
         model.save_weights(checkpoint_dir / "pretrain.h5")
     model_target.set_weights(model.get_weights())
